@@ -1,0 +1,185 @@
+from flask import Flask, request, redirect, render_template_string, session, flash, url_for
+
+# ------------------------------
+# Survey Models (normally in surveys.py)
+# ------------------------------
+
+class Question:
+    """A single survey question."""
+    def __init__(self, question, choices, allow_text=False):
+        self.question = question
+        self.choices = choices
+        self.allow_text = allow_text
+
+class Survey:
+    """A survey with a title, instructions, and a list of questions."""
+    def __init__(self, title, instructions, questions):
+        self.title = title
+        self.instructions = instructions
+        self.questions = questions
+
+# A sample satisfaction survey with 4 questions
+satisfaction_survey = Survey(
+    title="Customer Satisfaction Survey",
+    instructions="We appreciate your feedback. Please answer the following questions:",
+    questions=[
+        Question("How satisfied are you with our service?",
+                 ["Very satisfied", "Satisfied", "Neutral", "Dissatisfied", "Very dissatisfied"]),
+        Question("Would you recommend us to a friend?",
+                 ["Yes", "No"]),
+        Question("How likely are you to return?",
+                 ["Very likely", "Likely", "Unlikely"]),
+        Question("How would you rate our pricing?",
+                 ["Excellent", "Good", "Average", "Poor"])
+    ]
+)
+
+# ------------------------------
+# Flask App Setup
+# ------------------------------
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "mysecretkey"  # Required for sessions and flash messages
+
+# ------------------------------
+# Base Template (using template inheritance)
+# ------------------------------
+
+base_template = """
+<!doctype html>
+<html>
+  <head>
+    <title>{% block title %}Survey{% endblock %}</title>
+  </head>
+  <body>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul style="color: red;">
+          {% for message in messages %}
+            <li>{{ message }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </body>
+</html>
+"""
+
+# Make the base template available to our inline templates
+app.jinja_loader.mapping["base.html"] = base_template
+
+# ------------------------------
+# Routes
+# ------------------------------
+
+# Step Two: Home page shows the survey title, instructions, and a start button.
+@app.route("/")
+def home():
+    home_template = """
+    {% extends "base.html" %}
+    {% block title %}{{ survey.title }}{% endblock %}
+    {% block content %}
+      <h1>{{ survey.title }}</h1>
+      <p>{{ survey.instructions }}</p>
+      <form action="{{ url_for('start') }}" method="post">
+        <button type="submit">Start Survey</button>
+      </form>
+    {% endblock %}
+    """
+    return render_template_string(home_template, survey=satisfaction_survey)
+
+# Step Eight (and Two): Reset session responses and start the survey.
+@app.route("/start", methods=["POST"])
+def start():
+    session["responses"] = []
+    return redirect(url_for("show_question", qid=0))
+
+# Step Three: Show the current question based on the URL parameter.
+@app.route("/questions/<int:qid>")
+def show_question(qid):
+    responses = session.get("responses")
+
+    # If the user hasn't started the survey yet, redirect to home.
+    if responses is None:
+        flash("Please start the survey first!")
+        return redirect(url_for("home"))
+
+    # If all questions have been answered, redirect to complete page.
+    if len(responses) == len(satisfaction_survey.questions):
+        return redirect(url_for("complete"))
+
+    # If the URL's qid doesn't match the number of responses, redirect to the correct question.
+    if qid != len(responses):
+        flash("Invalid question id. Please answer the questions in order.")
+        return redirect(url_for("show_question", qid=len(responses)))
+
+    # Retrieve the current question.
+    question = satisfaction_survey.questions[qid]
+    question_template = """
+    {% extends "base.html" %}
+    {% block title %}Question {{ qid + 1 }}{% endblock %}
+    {% block content %}
+      <h2>Question {{ qid + 1 }} of {{ total }}</h2>
+      <p>{{ question.question }}</p>
+      <form action="{{ url_for('handle_answer') }}" method="post">
+        {% for choice in question.choices %}
+          <div>
+            <input type="radio" name="answer" id="{{ choice }}" value="{{ choice }}" required>
+            <label for="{{ choice }}">{{ choice }}</label>
+          </div>
+        {% endfor %}
+        <button type="submit">Submit</button>
+      </form>
+    {% endblock %}
+    """
+    return render_template_string(
+        question_template,
+        qid=qid,
+        total=len(satisfaction_survey.questions),
+        question=question
+    )
+
+# Step Four: Handle answer submission and redirect to the next question.
+@app.route("/answer", methods=["POST"])
+def handle_answer():
+    answer = request.form.get("answer")
+    if not answer:
+        flash("Please select an answer.")
+        return redirect(url_for("show_question", qid=len(session.get("responses", []))))
+
+    responses = session.get("responses")
+    if responses is None:
+        flash("Session expired. Please start over.")
+        return redirect(url_for("home"))
+
+    responses.append(answer)
+    session["responses"] = responses
+
+    # Step Five: Redirect to the thank-you page if survey is complete.
+    if len(responses) == len(satisfaction_survey.questions):
+        return redirect(url_for("complete"))
+    else:
+        return redirect(url_for("show_question", qid=len(responses)))
+
+# Step Five: Thank you page once survey is complete.
+@app.route("/complete")
+def complete():
+    complete_template = """
+    {% extends "base.html" %}
+    {% block title %}Thank You!{% endblock %}
+    {% block content %}
+      <h1>Thank You for Completing the Survey!</h1>
+      <p>Your responses: {{ responses }}</p>
+      <a href="{{ url_for('home') }}">Return Home</a>
+    {% endblock %}
+    """
+    responses = session.get("responses")
+    return render_template_string(complete_template, responses=responses)
+
+# ------------------------------
+# Run the App
+# ------------------------------
+
+if __name__ == '__main__':
+    app.run(debug=True)
