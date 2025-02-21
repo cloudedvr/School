@@ -1,0 +1,187 @@
+from flask import Flask, request, session, jsonify, render_template_string
+import random, string
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "secret!"  # Required for sessions
+
+# A sample set of valid words (in a real app, you’d use a full dictionary)
+VALID_WORDS = {"CAT", "DOG", "TREE", "HELLO", "WORLD", "BOGGLE", "PYTHON", "FLASK", "GAME", "TEST", "WORD"}
+
+def make_board():
+    """Create a 5x5 board of random uppercase letters."""
+    board = []
+    for _ in range(5):
+        row = [random.choice(string.ascii_uppercase) for _ in range(5)]
+        board.append(row)
+    return board
+
+def check_valid_word(board, word):
+    """Check if a word is both in our dictionary and can be formed on the board.
+    
+    Returns one of:
+      - "ok" if the word is valid and on the board,
+      - "not-on-board" if the word isn’t found on the board,
+      - "not-a-word" if the word isn’t in the dictionary.
+    """
+    word = word.upper()
+    if word not in VALID_WORDS:
+        return "not-a-word"
+    # Try to find the word on the board using DFS
+    for i in range(len(board)):
+        for j in range(len(board[0])):
+            if board[i][j] == word[0]:
+                if search_word(board, word, i, j, set()):
+                    return "ok"
+    return "not-on-board"
+
+def search_word(board, word, i, j, visited):
+    """Recursively search for the word on the board starting from (i, j)."""
+    if not word:
+        return True
+    # Check boundaries and if already visited
+    if i < 0 or i >= len(board) or j < 0 or j >= len(board[0]) or (i, j) in visited:
+        return False
+    if board[i][j] != word[0]:
+        return False
+    visited.add((i, j))
+    # Explore all 8 neighbors (horizontal, vertical, and diagonal)
+    directions = [(-1, -1), (-1, 0), (-1, 1),
+                  (0, -1),           (0, 1),
+                  (1, -1),  (1, 0),  (1, 1)]
+    for di, dj in directions:
+        if search_word(board, word[1:], i + di, j + dj, visited):
+            return True
+    visited.remove((i, j))
+    return False
+
+@app.route("/")
+def index():
+    """Render the game board and setup a new game."""
+    board = make_board()
+    session["board"] = board
+    session["guessed"] = []
+    # Render the HTML page with the board and game controls
+    html = """
+    <!doctype html>
+    <html>
+    <head>
+      <title>Boggle Game</title>
+      <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    </head>
+    <body>
+      <h1>Boggle</h1>
+      <div id="board">
+        {% for row in board %}
+          <div class="row">
+            {% for letter in row %}
+              <span class="cell">{{ letter }}</span>
+            {% endfor %}
+          </div>
+        {% endfor %}
+      </div>
+      <div>
+        <p>Score: <span id="score">0</span></p>
+        <p>Time remaining: <span id="timer">60</span> seconds</p>
+      </div>
+      <div>
+        <form id="word-form">
+          <input type="text" id="word" autocomplete="off"/>
+          <button type="submit">Submit Word</button>
+        </form>
+      </div>
+      <div>
+        <p id="message"></p>
+      </div>
+      <script>
+        let score = 0;
+        let timer = 60;
+        // Countdown timer: 60 seconds per game
+        let timerId = setInterval(function(){
+             timer -= 1;
+             document.getElementById('timer').innerText = timer;
+             if (timer <= 0) {
+                clearInterval(timerId);
+                document.getElementById('word').disabled = true;
+                document.getElementById('message').innerText = "Time's up!";
+                // Post the final score to the server
+                axios.post("/post-score", { score: score })
+                  .then(function(response) {
+                      console.log(response.data);
+                  });
+             }
+        }, 1000);
+
+        // Handle word submission via AJAX
+        document.getElementById('word-form').addEventListener('submit', function(e){
+             e.preventDefault();
+             const wordInput = document.getElementById('word');
+             let word = wordInput.value;
+             wordInput.value = "";
+             axios.get("/check-word", { params: { word: word } })
+                .then(function(response){
+                   let result = response.data.result;
+                   let messageElem = document.getElementById('message');
+                   if (result === "ok") {
+                      messageElem.innerText = "Added: " + word;
+                      score += word.length;
+                      document.getElementById('score').innerText = score;
+                   } else if (result === "not-on-board") {
+                      messageElem.innerText = word + " is not on the board.";
+                   } else if (result === "not-a-word") {
+                      messageElem.innerText = word + " is not a valid word.";
+                   } else if (result === "already-used") {
+                      messageElem.innerText = word + " has already been used.";
+                   }
+                });
+        });
+      </script>
+      <style>
+        .row { margin: 5px; }
+        .cell {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 1px solid black;
+            text-align: center;
+            line-height: 30px;
+            margin: 2px;
+        }
+      </style>
+    </body>
+    </html>
+    """
+    return render_template_string(html, board=board)
+
+@app.route("/check-word")
+def check_word():
+    """Handle AJAX request: check if the guessed word is valid."""
+    word = request.args.get("word", "").upper()
+    board = session.get("board")
+    if not board:
+        return jsonify({"result": "error", "message": "No board in session."})
+    guessed = session.get("guessed", [])
+    if word in guessed:
+        return jsonify({"result": "already-used"})
+    result = check_valid_word(board, word)
+    if result == "ok":
+        guessed.append(word)
+        session["guessed"] = guessed
+    return jsonify({"result": result})
+
+@app.route("/post-score", methods=["POST"])
+def post_score():
+    """Receive the final score and update game statistics."""
+    data = request.get_json()
+    score = data.get("score", 0)
+    highscore = session.get("highscore", 0)
+    nplays = session.get("nplays", 0)
+    nplays += 1
+    brokeRecord = False
+    if score > highscore:
+        session["highscore"] = score
+        brokeRecord = True
+    session["nplays"] = nplays
+    return jsonify({"brokeRecord": brokeRecord, "highscore": session.get("highscore"), "nplays": nplays})
+
+if __name__ == "__main__":
+    app.run(debug=True)
